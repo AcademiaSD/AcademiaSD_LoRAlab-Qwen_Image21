@@ -1,143 +1,155 @@
 
-# AcademiaSD Qwen-Image 2.1 LoRAlab (Work in Progress)
+# 🚧 WIP — AcademiaSD Qwen-Image 2.1 LoRAlab
 
 > [!WARNING]
-> **🚧 EVERYTHING IS PENDING / TODO ESTÁ PENDIENTE 🚧**
+> **Work in progress / En desarrollo.** Training works and has been tested, but the project is still changing and some features have not been verified yet. Every feature below is marked **✅ Verified** or **⚠️ Not verified**.
 >
-> This repository is under active development and **does not contain working code yet**. Every feature, script, number and step described below is a **planned design**, not a released implementation. VRAM and speed figures are **estimates** that have not been measured yet.
->
-> Este repositorio está en desarrollo y **todavía no contiene código funcional**. Todas las funciones, scripts, cifras y pasos descritos abajo son un **diseño planificado**, no una implementación publicada. Las cifras de VRAM y velocidad son **estimaciones** aún sin medir.
+> **El entrenamiento funciona y está probado, pero el proyecto sigue cambiando y hay funciones sin verificar.** Cada función de abajo está marcada como **✅ Verificado** o **⚠️ Sin verificar**.
+
+![AcademiaSD_LoRAlab-Qwen_Image21](assets/portada.jpg)
 
 <p align="center">
-  <b>An ultra-fast, low-resource Web GUI & pipeline for training Qwen-Image 2.1 (NF4) LoRAs.</b>
+  <b>A fast, low-resource Web GUI & pipeline for training Qwen-Image 2.1 (NF4) LoRAs: characters, objects, styles and edits.</b>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Status-Work%20in%20Progress-red.svg" alt="Status">
-  <img src="https://img.shields.io/badge/Python-3.10%2B-blue.svg" alt="Python Version">
-  <img src="https://img.shields.io/badge/PyTorch-2.4%2B-orange.svg" alt="PyTorch">
+  <img src="https://img.shields.io/badge/Status-WIP-orange.svg" alt="Status">
+  <img src="https://img.shields.io/badge/Python-3.13-blue.svg" alt="Python Version">
+  <img src="https://img.shields.io/badge/PyTorch-2.14%20cu130-orange.svg" alt="PyTorch">
   <img src="https://img.shields.io/badge/CUDA-NVIDIA-green.svg" alt="CUDA">
   <img src="https://img.shields.io/badge/UI-Flask%20%2B%20HTML5-purple.svg" alt="Web UI">
 </p>
 
+All measurements below were taken on an **RTX 5080 (16 GB)**.
+
 ---
 
-## 🗺️ Roadmap
+## ✨ Features
 
-| Stage | Status |
+### Training
+| Feature | Status |
 | :--- | :--- |
-| Repository & README | ✅ Done |
-| Pre-quantized NF4 checkpoint (DiT + Text Encoder) | ⏳ Pending |
-| `1_pre_cache_qwen_image21.py` (Text embeddings + VAE latents) | ⏳ Pending |
-| `2_train_lora_qwen_image21.py` (DiT NF4 LoRA training) | ⏳ Pending |
-| LoRA export to ComfyUI key format | ⏳ Pending |
-| Training previews | ⏳ Pending |
-| Web GUI (Flask + HTML5), launchers & installer | ⏳ Pending |
-| VRAM / speed benchmarks | ⏳ Pending |
-| Edit / reference-image LoRAs | 🔮 Future (phase 2) |
+| Character / object / style LoRAs (image + caption) | ✅ Verified — 512×512, rank 8/alpha 8, LR 4e-4, 500 steps: good likeness, no overfitting, clothes and backgrounds change freely. ~9 min 20 s (~1 s/step) |
+| Edit LoRAs (`name_before` / `name_after` pairs + instruction) | ✅ Verified — 30 pairs, 512×512, 300 steps, ~9 min (1.7 s/step): the style is learned and applied to an image outside the dataset |
+| 768×768 / 1024×1024 training | ✅ Verified — 768²: 2.2 s/step, ~8.4 GB VRAM · 1024²: ~4.3 s/step, ~7.6–8.4 GB VRAM |
+| NF4 transformer (7B) | ✅ Verified — loads in ~2 s, 3.9 GB VRAM, cosine 0.998–0.9996 vs BF16 |
+| LoRA Targets: Blocks (attention + MLP, default) / All | ✅ Verified — Blocks combines cleanly with the Turbo LoRA |
+| FP32 LoRA + AdamW, gradient checkpointing, cosine LR with warmup | ✅ Verified |
+| Exact-step resume (uses the checkpoint's layers, rank and alpha) | ✅ Verified |
+| Live settings while training (steps, save/preview every, preview settings, caption mode, turbo, LR) | ✅ Verified |
+| Live preview **seed** | ⚠️ Not verified |
+| Live **custom preview prompt** (encoded on CPU in the background, no GPU used) | ⚠️ Not verified |
+| 8 GB GPUs | ⚠️ Not verified (training at 768² peaks at ~8.4 GB; previews add a short VAE peak) |
+
+### Previews
+| Feature | Status |
+| :--- | :--- |
+| Normal previews (default 30 steps, CFG 3) | ✅ Verified |
+| Turbo previews with the [Viggle Turbo LoRA](https://huggingface.co/Viggle/Qwen-Image-2.1-viggle-turbo) (4 steps, CFG 1) | ✅ Verified — 5.3 s vs 33.7 s at 608×960 |
+| Edit previews on a user image outside the dataset | ✅ Verified (pre-cache + trainer) · ⚠️ UI file picker not verified |
+
+### Pre-cache & text encoder
+| Feature | Status |
+| :--- | :--- |
+| Text encoder Qwen3-VL-8B: BF16 CPU offload (default), BF16, INT8, NF4 | ✅ Verified — per-token error vs BF16: INT8 ~9%, NF4 ~24% |
+| RGBA VAE latents, 32-px buckets, no prompt truncation | ✅ Verified — VAE round trip 34–40 dB PSNR |
+| Re-running pre-cache skips latents already cached | ⚠️ Logic verified on CPU, not in a full run |
+
+### Dataset tools
+| Feature | Status |
+| :--- | :--- |
+| Auto-captioner with Qwen3-VL-8B (the model's own text encoder, NF4, no extra download): **Normal** and **Edit** modes | ✅ Verified from script (~11 s/image, ~3 s/pair, ~6 GB VRAM) · ⚠️ UI button not verified |
+| Dataset Manager: search, grid sizes, resizable grid, per-image delete, common text (append / replace / remove), clear captions | ✅ Verified |
+| Delete Pre-Cache / Delete Training buttons | ✅ Verified (server) |
+| `.parquet` extractor (edit pairs or single images, balanced, filtered by tags and colorfulness) | ✅ Verified |
+
+### Export
+| Feature | Status |
+| :--- | :--- |
+| LoRA in diffusers/PEFT format with per-layer `alpha` | ✅ Verified with ComfyUI's own LoRA loader (all layers mapped, incl. fused `gate_up`) |
+| Metadata tags (`ss_*` kohya convention, trigger word for CivitAI) | ✅ Verified |
+| One-click "Send to Models" | ⚠️ Not verified |
+
+### Install & update
+| Feature | Status |
+| :--- | :--- |
+| `Install_LoRAlab-Qwen_Image21.bat` (Python 3.13 venv, PyTorch cu130, diffusers from GitHub) | ✅ Verified |
+| `Run_LoRAlab-Qwen_Image21.bat` | ✅ Verified |
+| Automatic model download from Hugging Face | ⚠️ Not verified (repository not published yet) |
+| `Update_LoRAlab-Qwen_Image21.bat` | ⚠️ Not verified (needs the public repository) |
 
 ---
 
-## 🔬 Technical Design: How it will be fast, light & high quality
+## 🔬 How it works
 
-**Qwen-Image 2.1** is a ~7-Billion parameter single-stream Diffusion Transformer (32 blocks, 4096 wide) conditioned on **Qwen3-VL-8B** and paired with a new 64-channel VAE with 16x spatial compression. **AcademiaSD Qwen-Image 2.1 LoRAlab** will follow the same proven pipeline as [AcademiaSD Krea2 LoRAlab](https://github.com/AcademiaSD/AcademiaSD_LoRAlab-Krea2) to make training possible on consumer GPUs.
+- **Two stages.** `1_pre_cache` encodes every caption with Qwen3-VL-8B and every image with the VAE once. `2_train_lora` never loads the text encoder or the VAE for training: 100% of the GPU goes to the DiT.
+- **NF4 transformer, rebuilt directly.** The 224 attention/MLP layers are NF4; the shared `modulation`, `txt_in`, `img_in`, timestep embedder and output layers stay in BF16. The model is built empty and filled from the NF4 cache, with no BF16 copy.
+- **Exact conditioning.** Captions are encoded like ComfyUI does at inference (last hidden layer before the final norm, system turn removed, no truncation), with the BF16 text encoder by default.
+- **Edit LoRAs.** The "before" image goes through Qwen3-VL together with the instruction and is prepended to the sequence as clean latents; the loss is computed only on the "after", as in the ComfyUI `TextEncodeQwenImage21` node.
 
 ---
 
-### 1. 📉 Planned VRAM Budget (estimated)
+## 🖥️ System Requirements
 
-| Memory Component | Standard Training | Qwen-Image 2.1 LoRAlab (target) |
+| Requirement | Tested | Notes |
 | :--- | :--- | :--- |
-| **DiT Model (7B)** | ~14.0 GB (BF16) | **~4.5 GB (4-bit NF4)** |
-| **Text Encoder (Qwen3-VL-8B)** | ~17.0 GB | **0.0 GB (Offloaded via Pre-Cache)** |
-| **VAE (Qwen-Image 2.1, 64ch)** | loaded | **0.0 GB (Offloaded via Pre-Cache)** |
-| **Optimizer States (AdamW)** | several GB | **~0.2 GB (8-Bit AdamW on LoRA)** |
-| **Activation Memory** | high | **~1.0 GB (Gradient Checkpointing)** |
-| **Total VRAM Peak** | **30+ GB** | **~6–8 GB (to be measured)** |
+| **OS** | Windows 11 | |
+| **GPU** | NVIDIA RTX 5080 16 GB | Less VRAM ⚠️ not verified |
+| **RAM** | 98 GB | The BF16 CPU-offload text encoder uses RAM for the layers that do not fit in VRAM |
+| **Python** | 3.13 (inside `venv`) | Installed automatically if missing |
 
-* **4-Bit NormalFloat (NF4) Quantization (`bitsandbytes`)**: The DiT backbone and the Qwen3-VL-8B text encoder will be quantized to NF4 (`Linear4bit`). Precision-critical modules (the shared `modulation`, `txt_in`, `img_in`, `proj_out`, `norm_out` and the timestep embedder) stay in BF16.
-* **Zero VRAM Wasted on Encoders (Offline Pre-Caching)**: Neither the text encoder nor the VAE will be loaded during training. Text embeddings and image latents are computed once and stored on disk.
-* **8-Bit AdamW Optimizer** and **Gradient Checkpointing** to keep optimizer and activation memory small.
-
----
-
-### 2. ⚡ Why Training Will Be Fast
-
-* **No Per-Step Encoding Overhead**: With everything pre-cached, 100% of GPU compute during training goes to the DiT.
-* **Short Sequences**: The 16x VAE with patch size 1 turns a 1024×1024 image into only **4096 image tokens**, and the DiT is smaller than Krea-2 (7B vs 12B).
-* **Pinned RAM & Non-Blocking CUDA Transfers** for cached latents and embeddings.
-
----
-
-### 3. 🎨 How Generation Quality Will Be Preserved
-
-* **Exact Text Conditioning**: Embeddings will match what ComfyUI feeds the model at inference: Qwen-Image 2.1 chat template, system turn removed, and the last hidden layer **without** the final RMSNorm.
-* **Exact Channel-Wise VAE Normalization**: 64-channel `latents_mean` / `latents_std` applied as `(z - mean) / std`.
-* **Native Architecture Behaviour**: Block-causal attention and t = 0 modulation of the text prefix, exactly as in the reference implementation.
-* **Resolution-Aware Noise Shift**: Dynamic timestep shift matching the model's scheduler.
-* **Full-Layer Target Coverage**: LoRA adapters on all attention and MLP linears of the 32 DiT blocks.
-
----
-
-## ✨ Planned Features
-
-- **🌐 Modern Web GUI** (Flask) for pre-caching, dataset editing, training, checkpointing and export.
-- **🚀 1-Click Auto Launch** with `Run_LoRAlab-Qwen_Image21.bat`.
-- **🖼️ Training Previews**.
-- **📊 Real-Time Hardware Telemetry**: RAM, VRAM and GPU temperature.
-- **🔑 Hugging Face Token Support** (`HF_token.json`) with download progress.
-- **🖼️ Dataset Inspector & Inline Caption Editor**, including batch Trigger Word injection.
-- **⏱️ Exact Step Resume Checkpoints**.
-- **📂 Automatic Project Folder Management**.
-- **🚀 One-Click Export ("Send to Models")** to ComfyUI and other WebUIs.
-- **🌐 Fully Bilingual (English / Español)**.
-
----
-
-## 🖥️ System Requirements (tentative)
-
-| Requirement | Minimum | Recommended |
-| :--- | :--- | :--- |
-| **OS** | Windows 10/11 | Windows 11 |
-| **GPU** | NVIDIA GPU with **8 GB VRAM** (to be confirmed) | NVIDIA GPU with **12 GB–24 GB VRAM** |
-| **Python** | Python 3.10+ (inside `venv`) | Python 3.10 / 3.11 |
-| **CUDA Toolkit** | CUDA 12.1+ | CUDA 12.8+ |
-
-Qwen-Image 2.1 requires `torch>=2.4`, `transformers>=5.17` and a recent Diffusers build, so this project will use its own virtual environment, separate from other LoRAlab projects.
+Qwen-Image 2.1 needs `transformers>=5.17` and diffusers from GitHub, so this project uses its own virtual environment.
 
 ---
 
 ## 📦 Installation
 
-⏳ **Pending.** There is nothing to install yet. / **Pendiente.** Todavía no hay nada que instalar.
+1. Clone or download the repository.
+2. Run `Install_LoRAlab-Qwen_Image21.bat`.
+3. (Optional) Run `Install_Triton&SageAtten220.bat`.
 
 ---
 
-## ⚡ Usage Guide
+## ⚡ Usage
 
-⏳ **Pending.** The workflow will mirror Krea2 LoRAlab: **Pre-Cache → Train → Export to ComfyUI**.
+1. Run `Run_LoRAlab-Qwen_Image21.bat` and open `http://127.0.0.1:5000`.
+2. **Dataset**: pick the folder. For edit LoRAs, name the pairs `name_before.png` / `name_after.png` and write the instruction in `name.txt`.
+3. **Captions** (optional): Create Captions in Normal or Edit mode, then review them in the Dataset Manager.
+4. **Pre-Cache**: choose resolution and text encoder, then Start Pre-Cache.
+5. **Train**: Start / Resume. Settings can be changed while training with Save JSON.
+6. **Export**: Send to Models, or copy the `.safetensors` from the output folder.
+
+### Starting point that worked
+| | Characters | Edits |
+| :--- | :--- | :--- |
+| Resolution | 512×512 | 512×512 |
+| Rank / Alpha | 8 / 8 | 8 / 8 |
+| LR | 4e-4 | 4e-4 |
+| Steps | 500 | 300 |
+| LoRA Targets | Blocks | Blocks |
 
 ---
 
-## 📁 Planned Project Structure
+## 📁 Project Structure
 
 ```text
 AcademiaSD_LoRAlab-Qwen_Image21/
-├── assets/
-├── 1_pre_cache_qwen_image21.py      # Text embedding & VAE latent pre-caching
-├── 2_train_lora_qwen_image21.py     # DiT 7B NF4 LoRA training
-├── server.py                        # Flask backend web server
-├── trainer_ui.html                  # HTML5 / CSS3 / JS Web GUI
-├── Install_LoRAlab-Qwen_Image21.bat # Installer
-├── Run_LoRAlab-Qwen_Image21.bat     # Windows 1-click launcher
-└── Update_LoRAlab-Qwen_Image21.bat  # Updater
+├── 0_caption_qwen_image21.py        # Auto-captioner (Normal / Edit)
+├── 1_pre_cache_qwen_image21.py      # Text embeddings + VAE latents
+├── 2_train_lora_qwen_image21.py     # NF4 LoRA training
+├── 5_conversor_QwenImage21_NF4.py   # Builds the NF4 model folder from the original
+├── 6_extract_parquet.py             # Extracts datasets from .parquet files
+├── server.py                        # Flask backend
+├── trainer_ui.html                  # Web GUI
+├── Install_LoRAlab-Qwen_Image21.bat
+├── Install_Triton&SageAtten220.bat
+├── Run_LoRAlab-Qwen_Image21.bat
+└── Update_LoRAlab-Qwen_Image21.bat
 ```
 
 ---
 
 ## 💬 Community & Support
-
-Join the **AcademiaSD** community to learn more about local image and video AI!
 
 - ▶ **YouTube**: [youtube.com/@Academia_SD](https://www.youtube.com/@Academia_SD)
 - 𝕏 **X (Twitter)**: [twitter.com/Academia_S_D](https://twitter.com/Academia_S_D)
@@ -148,6 +160,6 @@ Join the **AcademiaSD** community to learn more about local image and video AI!
 
 ## 📜 Credits & License
 
-Developed with ❤️ by **AcademiaSD**. Built upon PyTorch, Diffusers, PEFT, Bitsandbytes, and Hugging Face Hub.
+Developed with ❤️ by **AcademiaSD**. Built upon PyTorch, Diffusers, Transformers, PEFT, Bitsandbytes and Hugging Face Hub.
 
-The Qwen-Image 2.1 model weights are distributed by Qwen under the **Qwen Research License**; check its terms before using or sharing trained LoRAs.
+The code is MIT licensed. The Qwen-Image 2.1 weights, the NF4 conversion and the Viggle Turbo LoRA are under the **Qwen Research License**: **non-commercial use only**. Check its terms before sharing trained LoRAs.
