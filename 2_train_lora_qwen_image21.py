@@ -623,7 +623,7 @@ def train_qwen_image21():
     if not os.path.exists(CACHE_DIR) or not any(f.endswith("_latent.pt") for f in os.listdir(CACHE_DIR)):
         print(f"\n[!] ERROR: Cache directory '{CACHE_DIR}' is empty or does not exist.")
         print(f"[!] Please run Pre-Cache first! / ¡Por favor ejecuta el Pre-Caché primero!")
-        return
+        sys.exit(2)  # la GUI muestra este código como "falta la pre-caché"
 
     ensure_model_downloaded(local_path=MODEL_ID, repo_id=HF_REPO_ID)
 

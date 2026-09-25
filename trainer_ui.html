@@ -245,7 +245,7 @@
                     <div class="form-group">
                         <label>Dataset Path / Ruta del Dataset:</label>
                         <div style="display:flex; gap:8px;">
-                            <input type="text" id="dataset_path" value="./dataset" onchange="loadDatasetInfo()">
+                            <input type="text" id="dataset_path" value="./dataset" onchange="datasetPathChanged()">
                             <button type="button" class="btn btn-secondary btn-sm" onclick="browseFolderNative('dataset')">Browse / Explorar</button>
                         </div>
                     </div>
@@ -462,6 +462,7 @@
                             <span class="sub-text">Detener</span>
                         </button>
                     </div>
+                    <div id="encode-status" style="display:none; margin-top:8px; padding:8px 10px; border:1px solid var(--warning); border-radius:6px; color:var(--warning); font-size:0.85rem;"></div>
                     <button type="button" class="btn btn-danger btn-sm btn-full" onclick="deleteProjectData('training')" style="margin-top:6px;"
                             title="Empties this project's output folder: LoRA checkpoints, resume point and previews. The pre-cache and the dataset are NOT touched. / Vacía la carpeta de salida de este proyecto: checkpoints del LoRA, punto de reanudación y previews. La pre-caché y el dataset NO se tocan.">
                         Delete Training / Borrar Entrenamiento
@@ -871,7 +872,7 @@
                 if (data.status === 'ok' && data.path) {
                     if (target === 'dataset') {
                         document.getElementById('dataset_path').value = data.path;
-                        loadDatasetInfo();
+                        datasetPathChanged();
                     } else if (target === 'export') {
                         document.getElementById('export_models_dir').value = data.path;
                     }
@@ -896,7 +897,13 @@
             } catch (e) { alert('Error: ' + e); }
         }
 
-        async function savePrecacheSettings() {
+        // El servidor lee la ruta del dataset de pre_cache_settings.json: hay que guardarla ANTES de
+        // refrescar el Dataset Manager, o seguiría mostrando la carpeta anterior.
+        async function datasetPathChanged() {
+            await savePrecacheSettings(true);
+        }
+
+        async function savePrecacheSettings(silent = false) {
             const proj = document.getElementById('project_name').value.trim();
             const precacheData = {
                 project_name: proj,
@@ -914,7 +921,8 @@
             const data = await res.json();
             if (data.status === 'ok') {
                 const listStr = data.all_saved ? data.all_saved.join('\n • ') : data.file;
-                alert(`✓ Pre-Cache Settings saved / Configuración Pre-Caché guardada en:\n • ${listStr}`);
+                if (!silent) alert(`✓ Pre-Cache Settings saved / Configuración Pre-Caché guardada en:\n • ${listStr}`);
+                loadDatasetInfo();
             }
         }
 
@@ -950,14 +958,19 @@
             };
             const res = await fetch('/api/save-train', { method: 'POST', body: JSON.stringify(trainData) });
             const data = await res.json();
+            setEncodingState(data.encoding, data.encoding_device);
             if (data.status === 'ok') {
                 const listStr = data.all_saved ? data.all_saved.join('\n • ') : data.file;
                 // Con el entrenamiento en marcha, el trainer aplica los ajustes en caliente en el paso siguiente.
                 const live = document.getElementById('status-badge').classList.contains('badge-running')
                     ? '\n\nTraining is running: steps, save/preview every, preview settings, caption mode, prompt, turbo and LR apply on the next step. Rank, alpha, batch and resolution need Stop -> Resume.\nEl entrenamiento está en marcha: pasos, guardar/preview cada, ajustes de preview, modo, prompt, turbo y LR se aplican en el paso siguiente. Rank, alpha, batch y resolución necesitan Detener -> Reanudar.'
                     : '';
-                alert(`✓ Train Settings saved / Configuración de Entrenamiento guardada en:\n • ${listStr}${live}`);
+                const encoding = data.encoding
+                    ? `\n\nThe preview prompt/image is being encoded on ${data.encoding_device}. Start/Resume and Stop are disabled until it finishes.\nSe está codificando en ${data.encoding_device} el prompt/imagen de la preview. Iniciar/Reanudar y Detener quedan desactivados hasta que termine.`
+                    : '';
+                alert(`✓ Train Settings saved / Configuración de Entrenamiento guardada en:\n • ${listStr}${live}${encoding}`);
             }
+            return data;
         }
 
         async function checkCheckpointInfo() {
@@ -1056,6 +1069,8 @@
                                         }
 
                                         appendTerminal(successMsg, false, msgClass);
+                                    } else if (scriptName === 'train' && msg.code === 2) {
+                                        appendTerminal("\n[SYSTEM] ✗ Training could not be run: create the Pre-Cache first. / No se ha podido realizar el entrenamiento: primero crea la Pre-Caché.", false, 'term-danger');
                                     } else {
                                         appendTerminal(`\n[SYSTEM] ⚠ Process finished with code / Proceso finalizado con código: ${msg.code}`, false, 'term-danger');
                                     }
@@ -1079,7 +1094,13 @@
         }
 
         async function runTrain() {
-            await saveTrainSettings();
+            const data = await saveTrainSettings();
+            if (data && data.encoding) {
+                // El trainer arrancaría con el prompt anterior: se lanza solo al terminar la codificación.
+                startAfterEncoding = true;
+                appendTerminal('\n[SYSTEM] Training will start when the preview prompt is encoded / El entrenamiento empezará cuando se codifique el prompt de la preview.');
+                return;
+            }
             startScript('train');
         }
 
@@ -1119,11 +1140,47 @@
             }
         }
 
+        // Mientras el servidor codifica en CPU el prompt/imagen de la preview no se puede lanzar ni detener nada.
+        let isRunning = false, encodingStage = null, startAfterEncoding = false;
+        const ENCODING_TEXT = {
+            loading: d => `⏳ Loading encoders on ${d}... / Cargando codificadores en ${d}...`,
+            image: d => `⏳ Encoding reference image latent on ${d}... / Codificando latente de la imagen de referencia en ${d}...`,
+            prompt: d => `⏳ Encoding custom prompt on ${d}... / Codificando custom prompt en ${d}...`
+        };
+
+        function applyButtonState() {
+            const encoding = encodingStage !== null;
+            document.getElementById('btn-caption').disabled = isRunning || encoding;
+            document.getElementById('btn-precache').disabled = isRunning || encoding;
+            document.getElementById('btn-train').disabled = isRunning || encoding;
+            document.getElementById('btn-stop').disabled = !isRunning || encoding;
+        }
+
+        function setEncodingState(stage, device) {
+            const wasEncoding = encodingStage !== null;
+            encodingStage = stage || null;
+            const box = document.getElementById('encode-status');
+            box.style.display = encodingStage ? 'block' : 'none';
+            box.innerText = encodingStage ? ENCODING_TEXT[encodingStage](device) : '';
+            applyButtonState();
+            if (wasEncoding && !encodingStage && startAfterEncoding) {
+                startAfterEncoding = false;
+                startScript('train');
+            }
+        }
+
+        async function pollEncoding() {
+            try {
+                const res = await fetch('/api/status?_=' + Date.now());
+                const data = await res.json();
+                setEncodingState(data.encoding, data.encoding_device);
+            } catch (e) {}
+        }
+        setInterval(pollEncoding, 2000);
+
         function setRunningState(running) {
-            document.getElementById('btn-caption').disabled = running;
-            document.getElementById('btn-precache').disabled = running;
-            document.getElementById('btn-train').disabled = running;
-            document.getElementById('btn-stop').disabled = !running;
+            isRunning = running;
+            applyButtonState();
             
             const badge = document.getElementById('status-badge');
             if (running) {
@@ -1184,7 +1241,12 @@
         }
 
         async function deleteDatasetImage(file) {
-            if (!confirm(`Remove "${file}" and its .txt caption from the dataset?\n\n¿Eliminar "${file}" y su caption .txt del dataset?\n\nThe files are deleted from disk. / Los ficheros se borran del disco.`)) return;
+            // En un par de edición se borran las dos mitades y el caption compartido: una sola no sirve.
+            const pair = file.match(/^(.*)_(before|after)\.[^.]+$/);
+            const what = pair
+                ? `the whole pair "${pair[1]}" (before + after) and its caption ${pair[1]}.txt\n\n¿Eliminar el par completo "${pair[1]}" (antes + después) y su caption ${pair[1]}.txt`
+                : `"${file}" and its .txt caption\n\n¿Eliminar "${file}" y su caption .txt`;
+            if (!confirm(`Remove ${what} del dataset?\n\nThe files are deleted from disk. / Los ficheros se borran del disco.`)) return;
             try {
                 const res = await fetch('/api/delete-dataset-image', {
                     method: 'POST',
@@ -1539,7 +1601,7 @@ AÑADIR ese texto al final de cada caption. Lo que ya estaba escrito se conserva
         function confirmFolderSelection() {
             if (currentBrowserTarget === 'dataset') {
                 document.getElementById('dataset_path').value = browserPath;
-                loadDatasetInfo();
+                datasetPathChanged();
             } else if (currentBrowserTarget === 'export') {
                 document.getElementById('export_models_dir').value = browserPath;
             }

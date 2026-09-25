@@ -273,21 +273,48 @@ def read_caption(name):
         return f.read().strip()
 
 
-def preview_edit_source(samples):
+def preview_edit_source(samples, image_path=None):
     # Imagen de antes para la preview de edición: la del usuario (fuera del dataset, mide si generaliza)
     # o, si no hay, el antes del primer par.
-    return PREVIEW_EDIT_IMAGE if PREVIEW_EDIT_IMAGE and os.path.exists(PREVIEW_EDIT_IMAGE) else samples[0][2]
+    image_path = PREVIEW_EDIT_IMAGE if image_path is None else image_path
+    return image_path if image_path and os.path.exists(image_path) else samples[0][2]
+
+
+def encode_latents(vae, jobs, device):
+    z_dim = vae.config.z_dim
+    latents_mean = torch.tensor(vae.config.latents_mean, device=device, dtype=torch.float32).view(1, z_dim, 1, 1, 1)
+    latents_std  = torch.tensor(vae.config.latents_std,  device=device, dtype=torch.float32).view(1, z_dim, 1, 1, 1)
+
+    with torch.inference_mode():
+        for idx, (src, out, (bw, bh)) in enumerate(jobs, 1):
+            img = fit(Image.open(src), bw, bh)
+
+            # El VAE lee RGBA: las imágenes sin transparencia llevan alfa = 1, como en el pipeline.
+            img_tensor = F_vision.pil_to_tensor(img.convert("RGBA")).unsqueeze(0).unsqueeze(2)
+            img_tensor = (img_tensor.float() / 127.5) - 1.0
+            img_tensor = img_tensor.to(device, dtype=vae.dtype)
+
+            z = vae.encode(img_tensor).latent_dist.mode().float()
+            latent = ((z - latents_mean) / latents_std)[:, :, 0].to(torch.bfloat16)
+
+            # Escritura atómica: el trainer puede estar leyendo la caché.
+            tmp = os.path.join(CACHE_DIR, out + ".tmp")
+            torch.save(latent.cpu(), tmp)
+            os.replace(tmp, os.path.join(CACHE_DIR, out))
+            del img_tensor, z, latent
+
+            print(f"[{idx}/{len(jobs)}] Image / Imagen: {os.path.basename(src)} -> {out} | {bw}x{bh}", flush=True)
 
 
 def preprocess_qwen_image21():
     if not os.path.exists(DATASET_PATH):
         print(f"[!] Dataset folder does not exist / La carpeta del dataset no existe: {DATASET_PATH}")
-        return
+        sys.exit(1)
 
     samples = find_samples()
     if not samples:
         print(f"[!] No images found in '{DATASET_PATH}'. Please add images.")
-        return
+        sys.exit(1)
     edit = samples[0][2] is not None
     print(f"  Dataset mode / Modo dataset : {'edit (before/after pairs) / edición (pares antes/después)' if edit else 'normal'} | {len(samples)} samples")
 
@@ -326,13 +353,18 @@ def preprocess_qwen_image21():
             print(f"[Custom Prompt Cache] Encoding: '{c_prompt}'" + (f" + {os.path.basename(preview_src)}" if edit else ""))
             image = fit(Image.open(preview_src).convert("RGBA"), *buckets["_custom"]) if edit else None
             encode_and_save(pipe, c_prompt, "_custom", image=image)
-            # El trainer compara con este texto para no volver a cargar el text encoder.
+            # El trainer y el servidor comparan con estos textos para saber si la caché está al día.
             with open(os.path.join(CACHE_DIR, "_custom_prompt.txt"), "w", encoding="utf-8") as f:
                 f.write(c_prompt)
-        else:
-            for f in ("_custom_embed.pt", "_custom_mask.pt", "_custom_imgmask.pt", "_custom_ctrl.pt", "_custom_prompt.txt"):
-                if os.path.exists(os.path.join(CACHE_DIR, f)):
-                    os.remove(os.path.join(CACHE_DIR, f))
+            with open(os.path.join(CACHE_DIR, "_custom_image.txt"), "w", encoding="utf-8") as f:
+                f.write(PREVIEW_EDIT_IMAGE)
+        # Restos de un prompt anterior, o de la preview de edición si el dataset ya no es de pares.
+        stale = () if custom_prompt else ("_custom_embed.pt", "_custom_mask.pt", "_custom_prompt.txt", "_custom_image.txt")
+        if not (custom_prompt and edit):
+            stale += ("_custom_imgmask.pt", "_custom_ctrl.pt")
+        for f in stale:
+            if os.path.exists(os.path.join(CACHE_DIR, f)):
+                os.remove(os.path.join(CACHE_DIR, f))
 
         for idx, (name, target, control) in enumerate(samples, 1):
             image = fit(Image.open(control).convert("RGBA"), *buckets[name]) if control else None
@@ -346,6 +378,7 @@ def preprocess_qwen_image21():
     # Un latente ya cacheado con el tamaño de bucket actual y más nuevo que su imagen no se
     # vuelve a codificar: relanzar el pre-caché para cambiar el prompt manual o los captions
     # solo cuesta la fase de texto. En edición, el antes se guarda como <nombre>_ctrl.pt.
+    # La imagen de la preview de edición se codifica siempre: puede ser otro fichero más antiguo.
     jobs = [(target, f"{name}_latent.pt", buckets[name]) for name, target, _ in samples]
     jobs += [(control, f"{name}_ctrl.pt", buckets[name]) for name, _, control in samples if control]
     if preview_src and custom_prompt:
@@ -354,7 +387,7 @@ def preprocess_qwen_image21():
     pending = []
     for src, out, (bw, bh) in jobs:
         lat_path = os.path.join(CACHE_DIR, out)
-        if (os.path.exists(lat_path) and os.path.getmtime(lat_path) > os.path.getmtime(src)
+        if (out != "_custom_ctrl.pt" and os.path.exists(lat_path) and os.path.getmtime(lat_path) > os.path.getmtime(src)
                 and tuple(torch.load(lat_path, weights_only=True).shape[-2:]) == (bh // 16, bw // 16)):
             continue
         pending.append((src, out, (bw, bh)))
@@ -367,57 +400,51 @@ def preprocess_qwen_image21():
 
     print("\nLoading VAE (Qwen-Image 2.1)... / Cargando VAE (Qwen-Image 2.1)...")
     vae = AutoencoderKLQwenImage21.from_pretrained(MODEL_ID, subfolder="vae", dtype=torch.bfloat16).to("cuda")
-
-    z_dim = vae.config.z_dim
-    latents_mean = torch.tensor(vae.config.latents_mean, device="cuda", dtype=torch.float32).view(1, z_dim, 1, 1, 1)
-    latents_std  = torch.tensor(vae.config.latents_std,  device="cuda", dtype=torch.float32).view(1, z_dim, 1, 1, 1)
-
-    with torch.inference_mode():
-        for idx, (src, out, (bw, bh)) in enumerate(pending, 1):
-            img = fit(Image.open(src), bw, bh)
-
-            # El VAE lee RGBA: las imágenes sin transparencia llevan alfa = 1, como en el pipeline.
-            img_tensor = F_vision.pil_to_tensor(img.convert("RGBA")).unsqueeze(0).unsqueeze(2)
-            img_tensor = (img_tensor.float() / 127.5) - 1.0
-            img_tensor = img_tensor.to("cuda", dtype=torch.bfloat16)
-
-            z = vae.encode(img_tensor).latent_dist.mode().float()
-            latent = ((z - latents_mean) / latents_std)[:, :, 0].to(torch.bfloat16)
-
-            torch.save(latent.cpu(), os.path.join(CACHE_DIR, out))
-            del img_tensor, z, latent
-
-            print(f"[{idx}/{len(pending)}] Image / Imagen: {os.path.basename(src)} -> {out} | {bw}x{bh}")
-
+    encode_latents(vae, pending, "cuda")
     del vae
     free_vram()
     print("\n✓ Pre-caching finished! VRAM freed / ¡Pre-caché finalizado! VRAM liberada.")
 
 
-def encode_prompt_cpu(cache_dir, prompt):
+def encode_preview_prompt(cache_dir, prompt, image_path, device):
     """
-    Codifica solo el prompt manual de las previews, en CPU con el text encoder BF16 (exacto).
-    Lo lanza el servidor al guardar un prompt nuevo con el entrenamiento en marcha: no toca
-    la GPU, y el trainer relee el embedding antes de la siguiente preview. En edición el prompt
-    va con la misma imagen de antes que ya usa la preview (su latente no cambia).
+    Codifica solo el prompt manual de las previews (y en edición su imagen de antes). Lo lanza el
+    servidor al guardar un prompt o una imagen nuevos. Sin entrenamiento en marcha va en GPU, con el
+    text encoder elegido para el Pre-Cache; con el entrenamiento en marcha va en CPU (text encoder
+    BF16 exacto y VAE en FP32) para no tocar su VRAM, y el trainer relee el embedding antes de la
+    siguiente preview.
     """
     global CACHE_DIR
     CACHE_DIR = cache_dir
+    where = device.upper().replace("CUDA", "GPU")
     image = None
-    if os.path.exists(os.path.join(cache_dir, "_custom_ctrl.pt")):
-        samples = find_samples()
-        src = preview_edit_source(samples)
+    if any(f.endswith("_ctrl.pt") and not f.startswith("_") for f in os.listdir(cache_dir)):
+        src = preview_edit_source(find_samples(), image_path)
         with Image.open(src) as im:
-            image = fit(im.convert("RGBA"), *bucket_size(*im.size))
+            bucket = bucket_size(*im.size)
+            image = fit(im.convert("RGBA"), *bucket)
+        # Se escribe aparte y se coloca al final junto al texto: el antes nuevo no encaja con el embedding viejo.
+        # El servidor lee las líneas "[Custom Prompt] Image/Prompt" para mostrar la fase en la GUI.
+        print(f"[Custom Prompt] Image: encoding reference image on {where} / Codificando imagen de referencia en {where}: {src}", flush=True)
+        vae = AutoencoderKLQwenImage21.from_pretrained(
+            MODEL_ID, subfolder="vae", dtype=torch.bfloat16 if device == "cuda" else torch.float32).to(device)
+        encode_latents(vae, [(src, "_custom_ctrl.new", bucket)], device)
+        del vae
+        free_vram()
 
-    te = Qwen3VLForConditionalGeneration.from_pretrained(
-        os.path.join(MODEL_ID, "text_encoder_BF16"), dtype=torch.bfloat16, device_map="cpu")
+    print(f"[Custom Prompt] Prompt: encoding on {where} / Codificando en {where}: '{prompt}'", flush=True)
+    if device == "cuda":
+        te = load_text_encoder()
+    else:
+        te = Qwen3VLForConditionalGeneration.from_pretrained(
+            os.path.join(MODEL_ID, "text_encoder_BF16"), dtype=torch.bfloat16, device_map="cpu")
     pipe = DiffusionPipeline.from_pretrained(MODEL_ID, transformer=None, vae=None, text_encoder=te, dtype=torch.bfloat16)
-    print(f"[Custom Prompt] Encoding on CPU / Codificando en CPU: '{prompt}'", flush=True)
     with torch.inference_mode():
-        embeds, mask, imgmask = pipe.encode_prompt(prompt=prompt, image=None if image is None else [image], device="cpu")
+        embeds, mask, imgmask = pipe.encode_prompt(prompt=prompt, image=None if image is None else [image], device=device)
     if mask is None:
         mask = torch.ones(embeds.shape[:2], dtype=torch.bool)
+    del pipe, te
+    free_vram()
 
     # Escrituras atómicas; el embedding el último, porque es el fichero que vigila el trainer.
     def replace(name, write):
@@ -427,15 +454,17 @@ def encode_prompt_cpu(cache_dir, prompt):
 
     replace("_custom_mask.pt", lambda f: torch.save(mask.bool().cpu(), f))
     if image is not None:
+        os.replace(os.path.join(cache_dir, "_custom_ctrl.new"), os.path.join(cache_dir, "_custom_ctrl.pt"))
         replace("_custom_imgmask.pt", lambda f: torch.save(imgmask.bool().cpu(), f))
     replace("_custom_prompt.txt", lambda f: open(f, "w", encoding="utf-8").write(prompt))
+    replace("_custom_image.txt", lambda f: open(f, "w", encoding="utf-8").write(image_path))
     replace("_custom_embed.pt", lambda f: torch.save(embeds.cpu(), f))
     print("[Custom Prompt] Ready / Listo.", flush=True)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 4 and sys.argv[1] == "--prompt-only":
-        # --prompt-only <carpeta de caché> <prompt con el trigger ya puesto>
-        encode_prompt_cpu(sys.argv[2], sys.argv[3])
+    if len(sys.argv) == 6 and sys.argv[1] == "--prompt-only":
+        # --prompt-only <carpeta de caché> <prompt con el trigger ya puesto> <imagen de antes o ""> <cuda|cpu>
+        encode_preview_prompt(*sys.argv[2:])
     else:
         preprocess_qwen_image21()

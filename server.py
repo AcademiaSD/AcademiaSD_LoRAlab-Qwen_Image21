@@ -75,6 +75,7 @@ UI_FILE = BASE_DIR / "trainer_ui.html"
 LOGO_FILE = ASSETS_DIR / "logo.png" if (ASSETS_DIR / "logo.png").exists() else BASE_DIR / "logo.png"
 
 PRECACHE_CONFIG = BASE_DIR / "pre_cache_settings.json"
+PREVIEW_KEYS = ("preview_custom_prompt", "preview_edit_image")
 TRAIN_CONFIG = BASE_DIR / "train_settings.json"
 HF_TOKEN_CONFIG = BASE_DIR / "HF_token.json"
 CAPTION_CONFIG = BASE_DIR / "caption_settings.json"
@@ -539,12 +540,52 @@ def save_precache():
             train_cfg["output_dir"] = f"./{output_dir_name}"
         if "trigger_word" in data:
             train_cfg["trigger_word"] = data["trigger_word"]
-        
+        for key in PREVIEW_KEYS:
+            if key in data:
+                train_cfg[key] = data[key]
+
         write_json_file(TRAIN_CONFIG, train_cfg)
 
         return jsonify({"status": "ok", "file": saved_files[0], "all_saved": saved_files})
     except Exception as exc:
         return jsonify({"status": "error", "error": str(exc)}), 500
+
+
+prompt_job = {"process": None, "args": None, "stage": None, "device": None}
+
+
+def encoding_stage():
+    # "loading", "image" o "prompt" mientras se codifica la preview manual; None si no hay nada en marcha.
+    process = prompt_job["process"]
+    return prompt_job["stage"] if process is not None and process.poll() is None else None
+
+
+def encode_preview_prompt(cache_dir, prompt, image):
+    # Un solo proceso a la vez: si se guarda otro prompt mientras codifica, gana el último.
+    # En GPU si está libre; con el entrenamiento en marcha, en CPU para no tocar su VRAM.
+    device = "cpu" if get_status()["script"] == "train" else "cuda"
+    args = [sys.executable, "-u", str(PRECACHE_SCRIPT), "--prompt-only", str(cache_dir), prompt, image, device]
+    if encoding_stage() is not None:
+        if prompt_job["args"] == args:
+            return
+        prompt_job["process"].terminate()
+        prompt_job["process"].wait()
+    env = {**os.environ, "CUDA_VISIBLE_DEVICES": ""} if device == "cpu" else None
+    process = subprocess.Popen(args, cwd=str(BASE_DIR), env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                               encoding="utf-8", errors="replace", bufsize=1)
+    prompt_job.update(process=process, args=args, stage="loading", device="GPU" if device == "cuda" else "CPU")
+
+    def follow():
+        # Reenvía la salida a la consola del servidor y actualiza la fase que muestra la GUI.
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            if prompt_job["process"] is process and line.startswith("[Custom Prompt] "):
+                stage = line[len("[Custom Prompt] "):].split(":", 1)[0].lower()
+                if stage in ("image", "prompt"):
+                    prompt_job["stage"] = stage
+
+    threading.Thread(target=follow, daemon=True).start()
 
 
 @app.route("/api/save-train", methods=["POST"])
@@ -561,22 +602,27 @@ def save_train():
         data["cache_dir"] = f"./{cache_dir_name}"
         data["output_dir"] = f"./{output_dir_name}"
 
-        previous_prompt = read_json_file(TRAIN_CONFIG, {}).get("preview_custom_prompt", "").strip()
-
         # 1. Guardar en raíz con nombre genérico
         write_json_file(TRAIN_CONFIG, data)
 
-        # Prompt de preview nuevo con el entrenamiento en marcha: se codifica en CPU en paralelo
-        # (sin tocar la GPU del entrenamiento) y el trainer lo relee antes de la siguiente preview.
+        # El Pre-Cache codifica el prompt y la imagen de las previews desde su propio json.
+        precache_cfg = read_json_file(PRECACHE_CONFIG, {})
+        for key in PREVIEW_KEYS:
+            precache_cfg[key] = data.get(key, "")
+        write_json_file(PRECACHE_CONFIG, precache_cfg)
+
+        # Si la caché no tiene el prompt o la imagen de preview guardados, se codifican en CPU en paralelo
+        # (sin tocar la GPU del entrenamiento) y el trainer los relee antes de la siguiente preview.
         prompt = data.get("preview_custom_prompt", "").strip()
-        status = get_status()
-        if prompt and prompt != previous_prompt and status["running"] and status["script"] == "train":
-            trigger = data.get("trigger_word", "").strip()
-            if trigger and trigger.lower() not in prompt.lower():
-                prompt = f"{trigger}, {prompt}"
-            cache_dir = resolve_config_path(data["cache_dir"], cache_dir_name)
-            subprocess.Popen([sys.executable, "-u", str(PRECACHE_SCRIPT), "--prompt-only", str(cache_dir), prompt],
-                             cwd=str(BASE_DIR), env={**os.environ, "CUDA_VISIBLE_DEVICES": ""})
+        trigger = data.get("trigger_word", "").strip()
+        if trigger and prompt and trigger.lower() not in prompt.lower():
+            prompt = f"{trigger}, {prompt}"
+        wanted = [prompt, data.get("preview_edit_image", "").strip()]
+        cache_dir = resolve_config_path(data["cache_dir"], cache_dir_name)
+        encoded = [(cache_dir / f).read_text(encoding="utf-8") if (cache_dir / f).exists() else None
+                   for f in ("_custom_prompt.txt", "_custom_image.txt")]
+        if prompt and wanted != encoded and (cache_dir / "_neg_embed.pt").exists() and get_status()["script"] != "precache":
+            encode_preview_prompt(cache_dir, *wanted)
         saved_files = [TRAIN_CONFIG.name]
 
         # 2. Guardar copia dentro de la carpeta del proyecto
@@ -587,7 +633,7 @@ def save_train():
             write_json_file(output_json_file, data)
             saved_files.append(f"{output_dir_name}/{output_json_file.name}")
 
-        return jsonify({"status": "ok", "file": saved_files[0], "all_saved": saved_files})
+        return jsonify({"status": "ok", "file": saved_files[0], "all_saved": saved_files, "encoding": encoding_stage(), "encoding_device": prompt_job["device"]})
     except Exception as exc:
         return jsonify({"status": "error", "error": str(exc)}), 500
 
@@ -598,7 +644,7 @@ def save_train():
 
 @app.route("/api/status", methods=["GET"])
 def api_status():
-    return jsonify(get_status())
+    return jsonify({**get_status(), "encoding": encoding_stage(), "encoding_device": prompt_job["device"]})
 
 
 @app.route("/api/checkpoint-info", methods=["GET"])
@@ -634,6 +680,9 @@ def run_script():
 
         if script_path is None or not script_path.exists():
             return jsonify({"status": "error", "error": f"Script not found / Script no encontrado: {script_name}"}), 404
+
+        if encoding_stage() is not None:
+            return jsonify({"status": "error", "error": "Encoding the preview prompt, wait until it finishes / Codificando el prompt de la preview, espera a que termine."}), 409
 
         with process_lock:
             if active_process is not None and active_process.poll() is None:
@@ -764,6 +813,24 @@ def serve_preview(filename):
     return send_from_directory(str(output_dir), requested.name)
 
 
+EDIT_SUFFIXES = ("_before", "_after")
+
+
+def caption_path(image_path):
+    # En un par de edición (nombre_before / nombre_after) el caption es uno solo: nombre.txt.
+    stem = image_path.stem
+    for suffix in EDIT_SUFFIXES:
+        if stem.endswith(suffix):
+            return image_path.with_name(stem[:-len(suffix)] + ".txt")
+    return image_path.with_suffix(".txt")
+
+
+def dataset_caption_paths(dataset_dir):
+    # Un .txt por muestra: los dos lados de un par comparten el suyo y solo cuentan una vez.
+    return list(dict.fromkeys(caption_path(f) for f in sorted(dataset_dir.iterdir())
+                              if f.is_file() and f.suffix.lower() in DATASET_EXTS))
+
+
 @app.route("/api/dataset-info", methods=["GET"])
 def dataset_info():
     dataset_dir = get_dataset_dir()
@@ -771,7 +838,7 @@ def dataset_info():
     if dataset_dir.is_dir():
         for file_path in sorted(dataset_dir.iterdir()):
             if file_path.is_file() and file_path.suffix.lower() in DATASET_EXTS:
-                txt_path = file_path.with_suffix(".txt")
+                txt_path = caption_path(file_path)
                 caption = ""
                 if txt_path.exists():
                     try:
@@ -784,7 +851,7 @@ def dataset_info():
     return jsonify({
         "path": str(dataset_dir),
         "image_count": len(images),
-        "caption_count": sum(1 for img in images if img["has_txt"]),
+        "caption_count": sum(1 for t in dataset_caption_paths(dataset_dir) if t.exists()) if dataset_dir.is_dir() else 0,
         "images": images[:500]
     })
 
@@ -816,7 +883,7 @@ def save_caption():
         img_path = (dataset_dir / filename).resolve()
         img_path.relative_to(dataset_dir.resolve())
         
-        txt_path = img_path.with_suffix(".txt")
+        txt_path = caption_path(img_path)
         txt_path.write_text(caption, encoding="utf-8")
         
         return jsonify({"status": "ok", "file": txt_path.name})
@@ -841,10 +908,7 @@ def batch_caption():
         if not dataset_dir.is_dir() or not (trigger or common):
             return jsonify({"status": "ok", "updated_count": 0})
 
-        for file_path in sorted(dataset_dir.iterdir()):
-            if not (file_path.is_file() and file_path.suffix.lower() in DATASET_EXTS):
-                continue
-            txt_path = file_path.with_suffix(".txt")
+        for txt_path in dataset_caption_paths(dataset_dir):
             current = txt_path.read_text(encoding="utf-8").strip() if txt_path.exists() else ""
 
             if not common:
@@ -890,9 +954,8 @@ def clear_captions():
         dataset_dir = get_dataset_dir()
         removed, errors = 0, []
         if dataset_dir.is_dir():
-            for file_path in sorted(dataset_dir.iterdir()):
-                txt = file_path.with_suffix(".txt")
-                if file_path.is_file() and file_path.suffix.lower() in DATASET_EXTS and txt.exists():
+            for txt in dataset_caption_paths(dataset_dir):
+                if txt.exists():
                     try:
                         txt.unlink()
                         removed += 1
@@ -905,7 +968,7 @@ def clear_captions():
 
 @app.route("/api/delete-dataset-image", methods=["POST"])
 def delete_dataset_image():
-    """Borra una imagen del dataset y su .txt."""
+    """Borra una imagen del dataset y su .txt. En un par de edición borra las dos mitades: una sola no sirve."""
     try:
         filename = str(request.get_json(force=True).get("file", "")).strip()
         dataset_dir = get_dataset_dir()
@@ -917,12 +980,19 @@ def delete_dataset_image():
         if not target.is_file() or target.suffix.lower() not in DATASET_EXTS:
             return jsonify({"status": "error", "error": f"Not found / No existe: {filename}"}), 404
 
-        removed = [target.name]
-        target.unlink()
-        txt = target.with_suffix(".txt")
-        if txt.is_file():
-            txt.unlink()
-            removed.append(txt.name)
+        files = [target]
+        for suffix in EDIT_SUFFIXES:
+            if target.stem.endswith(suffix):
+                base = target.stem[:-len(suffix)]
+                files = [f for f in dataset_dir.iterdir() if f.is_file() and f.suffix.lower() in DATASET_EXTS
+                         and f.stem in (base + "_before", base + "_after")]
+        files.append(caption_path(target))
+
+        removed = []
+        for f in files:
+            if f.is_file():
+                f.unlink()
+                removed.append(f.name)
         return jsonify({"status": "ok", "removed": removed})
     except Exception as exc:
         return jsonify({"status": "error", "error": str(exc)}), 500
