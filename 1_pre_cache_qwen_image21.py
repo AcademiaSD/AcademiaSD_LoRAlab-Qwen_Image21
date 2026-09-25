@@ -55,6 +55,7 @@ DEFAULTS = {
     "trigger_word": "",
     "preview_custom_prompt": "",
     "preview_edit_image": "",
+    "lora_type": "normal",
 }
 
 # ── CARGAR CONFIGURACIÓN / LOAD CONFIG ──────────────────────────────────────
@@ -77,8 +78,10 @@ TEXT_ENCODER = cfg.get("text_encoder", DEFAULTS["text_encoder"])
 TRIGGER_WORD = cfg.get("trigger_word", "")
 PROJECT_NAME = cfg.get("project_name", "").strip()
 PREVIEW_CUSTOM_PROMPT = cfg.get("preview_custom_prompt", "").strip()
+# "normal" (imagen + caption) o "edit" (pares nombre_before / nombre_after + instrucción).
+LORA_TYPE = cfg.get("lora_type", DEFAULTS["lora_type"])
 # Solo edición: imagen de antes (fuera del dataset) para ver en las previews cómo aplica el efecto.
-PREVIEW_EDIT_IMAGE = cfg.get("preview_edit_image", "").strip()
+PREVIEW_EDIT_IMAGE = cfg.get("preview_edit_image", "").strip() if LORA_TYPE == "edit" else ""
 
 # Formato automático de carpeta de caché según nombre del proyecto
 if PROJECT_NAME:
@@ -253,16 +256,16 @@ def fit(img, bw, bh):
 
 def find_samples():
     """
-    [(nombre, ruta_después_o_imagen, ruta_antes_o_None)]. Si la carpeta tiene pares
-    nombre_before / nombre_after es un dataset de edición y solo cuentan los pares.
+    [(nombre, ruta_después_o_imagen, ruta_antes_o_None)]. En un LoRA de edición solo cuentan
+    los pares nombre_before / nombre_after; en uno normal, cada imagen es una muestra.
     """
     files = sorted(f for f in os.listdir(DATASET_PATH) if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp")))
     stems = {os.path.splitext(f)[0]: f for f in files}
+    if LORA_TYPE != "edit":
+        return [(stem, os.path.join(DATASET_PATH, f), None) for stem, f in stems.items()]
     pairs = [(s[:-len("_before")], stems[s[:-len("_before")] + "_after"], f) for s, f in stems.items()
              if s.endswith("_before") and s[:-len("_before")] + "_after" in stems]
-    if pairs:
-        return [(name, os.path.join(DATASET_PATH, after), os.path.join(DATASET_PATH, before)) for name, after, before in pairs]
-    return [(stem, os.path.join(DATASET_PATH, f), None) for stem, f in stems.items()]
+    return [(name, os.path.join(DATASET_PATH, after), os.path.join(DATASET_PATH, before)) for name, after, before in pairs]
 
 
 def read_caption(name):
@@ -312,11 +315,25 @@ def preprocess_qwen_image21():
         sys.exit(1)
 
     samples = find_samples()
+    edit = LORA_TYPE == "edit"
     if not samples:
-        print(f"[!] No images found in '{DATASET_PATH}'. Please add images.")
+        if edit:
+            print(f"[!] Edit LoRA but no name_before / name_after pairs in '{DATASET_PATH}' / "
+                  f"LoRA de edición pero no hay pares nombre_before / nombre_after.")
+        else:
+            print(f"[!] No images found in '{DATASET_PATH}'. Please add images.")
         sys.exit(1)
-    edit = samples[0][2] is not None
-    print(f"  Dataset mode / Modo dataset : {'edit (before/after pairs) / edición (pares antes/después)' if edit else 'normal'} | {len(samples)} samples")
+    print(f"  LoRA type / Tipo de LoRA    : {'edit (before/after pairs) / edición (pares antes/después)' if edit else 'normal'} | {len(samples)} samples")
+
+    # El trainer carga todo lo que haya en la caché: se quitan las muestras que ya no están en el
+    # dataset y, al pasar de edición a normal, los antes (_ctrl, _imgmask).
+    suffixes = ("latent", "embed", "mask") + (("ctrl", "imgmask") if edit else ())
+    expected = {f"{name}_{suffix}.pt" for name, _, _ in samples for suffix in suffixes}
+    stale = [f for f in os.listdir(CACHE_DIR) if f.endswith(".pt") and not f.startswith("_") and f not in expected]
+    for f in stale:
+        os.remove(os.path.join(CACHE_DIR, f))
+    if stale:
+        print(f"  Removed {len(stale)} stale cache files / Eliminados {len(stale)} ficheros antiguos de la caché")
 
     ensure_model_downloaded(local_path=MODEL_ID, repo_id=HF_REPO_ID, text_encoder_dir=TEXT_ENCODER_DIR)
 

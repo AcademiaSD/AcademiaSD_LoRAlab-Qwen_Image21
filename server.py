@@ -75,7 +75,7 @@ UI_FILE = BASE_DIR / "trainer_ui.html"
 LOGO_FILE = ASSETS_DIR / "logo.png" if (ASSETS_DIR / "logo.png").exists() else BASE_DIR / "logo.png"
 
 PRECACHE_CONFIG = BASE_DIR / "pre_cache_settings.json"
-PREVIEW_KEYS = ("preview_custom_prompt", "preview_edit_image")
+PREVIEW_KEYS = ("lora_type", "preview_custom_prompt", "preview_edit_image")
 TRAIN_CONFIG = BASE_DIR / "train_settings.json"
 HF_TOKEN_CONFIG = BASE_DIR / "HF_token.json"
 CAPTION_CONFIG = BASE_DIR / "caption_settings.json"
@@ -617,7 +617,7 @@ def save_train():
         trigger = data.get("trigger_word", "").strip()
         if trigger and prompt and trigger.lower() not in prompt.lower():
             prompt = f"{trigger}, {prompt}"
-        wanted = [prompt, data.get("preview_edit_image", "").strip()]
+        wanted = [prompt, data.get("preview_edit_image", "").strip() if data.get("lora_type") == "edit" else ""]
         cache_dir = resolve_config_path(data["cache_dir"], cache_dir_name)
         encoded = [(cache_dir / f).read_text(encoding="utf-8") if (cache_dir / f).exists() else None
                    for f in ("_custom_prompt.txt", "_custom_image.txt")]

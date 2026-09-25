@@ -251,6 +251,14 @@
                     </div>
 
                     <div class="form-group">
+                        <label title="Normal: one image + caption per sample. Edit: name_before / name_after pairs + instruction in name.txt. / Normal: una imagen + caption por muestra. Edición: pares nombre_before / nombre_after + instrucción en nombre.txt.">LoRA Type / Tipo de LoRA:</label>
+                        <select id="lora_type" onchange="applyLoraType()">
+                            <option value="normal">Normal LoRA (image + caption / imagen + caption)</option>
+                            <option value="edit">Edit LoRA (before / after pairs / pares antes / después)</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
                         <label>Cache Folder / Carpeta Caché (Auto):</label>
                         <input type="text" id="precache_cache_dir" value="./cached_data_qwen_image21" readonly title="Ruta informativa generada automáticamente">
                     </div>
@@ -419,12 +427,14 @@
                     <div class="form-group" id="custom_prompt_container" style="display:none; margin-top: 4px;">
                         <label style="color:#38bdf8; font-weight:600;">Custom Preview Prompt / Prompt Manual:</label>
                         <textarea id="train_preview_custom_prompt" rows="2" placeholder="Escribe aquí tu prompt personalizado para la previsualización..."></textarea>
+                        <div id="edit_image_container" style="display:none;">
                         <label style="color:#38bdf8; font-weight:600; margin-top:6px;"
                                title="Edit datasets (name_before / name_after) only. The preview applies the instruction above to this image. Use one that is NOT in the dataset: it is the only way to see whether the effect generalizes. Empty = the 'before' of the first pair. Encoded by Pre-Cache. / Solo datasets de edición (nombre_before / nombre_after). La preview aplica la instrucción de arriba a esta imagen. Usa una que NO esté en el dataset: es la única forma de ver si el efecto generaliza. Vacío = el 'antes' del primer par. Lo codifica el Pre-Caché.">
                             Edit Preview Image (before) / Imagen de antes (edición):</label>
                         <div style="display:flex; gap:8px;">
                             <input type="text" id="preview_edit_image" value="" placeholder="(empty = first pair / vacío = primer par)">
                             <button type="button" class="btn btn-secondary btn-sm" onclick="browseImageNative()">Browse / Explorar</button>
+                        </div>
                         </div>
                     </div>
 
@@ -636,6 +646,11 @@
             }
         }
 
+        function applyLoraType() {
+            const edit = document.getElementById('lora_type').value === 'edit';
+            document.getElementById('edit_image_container').style.display = edit ? 'block' : 'none';
+        }
+
         function toggleCaptionMode(mode) {
             const container = document.getElementById('custom_prompt_container');
             if (mode === 'custom') {
@@ -736,6 +751,8 @@
                     if (p.project_name) document.getElementById('project_name').value = p.project_name;
                     if (p.trigger_word) document.getElementById('trigger_word').value = p.trigger_word;
                     if (p.dataset_path) document.getElementById('dataset_path').value = p.dataset_path;
+                    document.getElementById('lora_type').value = p.lora_type || 'normal';
+                    applyLoraType();
                     if (p.target_area) {
                         document.getElementById('precache_target_area').value = p.target_area;
                         const sel = document.getElementById('target_area_select');
@@ -798,6 +815,10 @@
                     if (data.project_name !== undefined) document.getElementById('project_name').value = data.project_name;
                     if (data.trigger_word !== undefined) document.getElementById('trigger_word').value = data.trigger_word;
                     if (data.dataset_path !== undefined) document.getElementById('dataset_path').value = data.dataset_path;
+                    if (data.lora_type !== undefined) {
+                        document.getElementById('lora_type').value = data.lora_type;
+                        applyLoraType();
+                    }
                     
                     if (data.target_area !== undefined) {
                         document.getElementById('precache_target_area').value = data.target_area;
@@ -914,6 +935,7 @@
                 max_side: parseInt(document.getElementById('precache_max_side').value),
                 text_encoder: document.getElementById('precache_text_encoder').value,
                 cache_dir: document.getElementById('precache_cache_dir').value,
+                lora_type: document.getElementById('lora_type').value,
                 preview_custom_prompt: document.getElementById('train_preview_custom_prompt').value.trim(),
                 preview_edit_image: document.getElementById('preview_edit_image').value.trim()
             };
@@ -947,6 +969,7 @@
                 preview_caption_mode: document.getElementById('train_preview_caption_mode').value,
                 preview_custom_prompt: document.getElementById('train_preview_custom_prompt').value.trim(),
                 preview_edit_image: document.getElementById('preview_edit_image').value.trim(),
+                lora_type: document.getElementById('lora_type').value,
                 preview_steps: parseInt(document.getElementById('train_preview_steps').value),
                 preview_cfg: parseFloat(document.getElementById('train_preview_cfg').value),
                 use_turbo: document.getElementById('train_use_turbo').checked,
