@@ -1,0 +1,18 @@
+# Modelo y entorno / Model and environment
+Qwen-Image21-NF4/
+venv/
+__pycache__/
+
+# Ejecuciones / Runs
+cached_data_*/
+qwen_image21_lora_output*/
+convert_log.txt
+
+# Ajustes y credenciales / Settings and credentials
+pre_cache_settings.json
+train_settings.json
+caption_settings.json
+HF_token.json
+
+# Referencia de Krea2 / Krea2 reference
+5_conversor_Krea2_NF4.py
