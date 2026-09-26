@@ -731,6 +731,10 @@ def run_script():
                             if buffer:
                                 yield f"data: {json.dumps({'type': 'output', 'text': buffer, 'replace': False}, ensure_ascii=False)}\n\n"
                                 buffer = ""
+                        elif char == '\x1b':
+                            # Códigos ANSI (el ESC[A de las barras anidadas de tqdm): la consola web los mostraría como texto.
+                            while (char := process.stdout.read(1)) and not char.isalpha():
+                                pass
                         else:
                             buffer += char
 
