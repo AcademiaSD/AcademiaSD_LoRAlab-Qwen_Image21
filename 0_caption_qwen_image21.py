@@ -31,6 +31,7 @@ import time
 
 import torch
 from PIL import Image
+from huggingface_hub import snapshot_download
 from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
 try:
@@ -73,6 +74,7 @@ EDIT_SUFFIXES = ("_before", "_after")
 
 PRECACHE_CONFIG = "pre_cache_settings.json"
 CONFIG_PATH = "caption_settings.json"
+HF_REPO_ID = "AcademiaSD/Qwen-Image-2.1-NF4-for-LoRA-Training"
 
 
 def read_json(path):
@@ -115,7 +117,11 @@ def find_samples(dataset, mode):
 def load_captioner(model_id):
     path = os.path.join(model_id, "text_encoder_NF4")
     if not os.path.exists(os.path.join(path, "config.json")):
-        raise FileNotFoundError(f"Captioner not found / No se encuentra el captioner: {path}")
+        # Instalación limpia: solo hace falta el text encoder NF4 y el processor (~5 GB), no el modelo entero.
+        print(f"Downloading captioner from Hugging Face / Descargando el captioner desde Hugging Face: {HF_REPO_ID}", flush=True)
+        token = read_json("HF_token.json").get("token", "").strip() or None
+        snapshot_download(repo_id=HF_REPO_ID, local_dir=model_id, token=token, max_workers=2,
+                          allow_patterns=["text_encoder_NF4/*", "processor/*"])
 
     print(f"Loading Qwen3-VL-8B (NF4)... / Cargando Qwen3-VL-8B (NF4)...", flush=True)
     model = Qwen3VLForConditionalGeneration.from_pretrained(path, dtype=torch.bfloat16, device_map="cuda")
