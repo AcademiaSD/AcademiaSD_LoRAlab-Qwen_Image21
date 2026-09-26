@@ -27,6 +27,8 @@ except Exception:
 
 # LLM.int8 avisa en cada matmul de que pasa las entradas de bf16 a fp16.
 warnings.filterwarnings("ignore", message=".*MatMul8bitLt.*")
+# NF4: las capas de visión (4304) no son múltiplo de 64 y usan el kernel general; solo cambia la velocidad.
+warnings.filterwarnings("ignore", message=".*is not aligned for fast kernel.*")
 
 HF_REPO_ID = "AcademiaSD/Qwen-Image-2.1-NF4-for-LoRA-Training"
 

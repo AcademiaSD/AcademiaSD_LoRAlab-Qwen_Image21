@@ -28,6 +28,7 @@ import os
 import sys
 import json
 import time
+import warnings
 
 import torch
 from PIL import Image
@@ -39,6 +40,9 @@ try:
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
+
+# NF4: las capas de visión (4304) no son múltiplo de 64 y usan el kernel general; solo cambia la velocidad.
+warnings.filterwarnings("ignore", message=".*is not aligned for fast kernel.*")
 
 DEFAULTS = {
     "model_id": "Qwen-Image21-NF4",
