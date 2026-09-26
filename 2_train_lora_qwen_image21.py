@@ -248,8 +248,10 @@ def unpack_latents(x, H, W):
 def make_img_mask(sample, H, W, device):
     # Cada ranura de imagen del text encoder representa un grupo 2x2 de latentes. En edición el
     # texto ya trae marcadas las ranuras del antes (imgmask); el objetivo va siempre al final.
-    text = sample["imgmask"][0].to(device) if "imgmask" in sample else \
-        torch.zeros(sample["emb"].shape[1], dtype=torch.bool, device=device)
+    # Con batch > 1 el texto viene rellenado a la derecha: el relleno no son ranuras de imagen.
+    text = torch.zeros(sample["emb"].shape[1], dtype=torch.bool, device=device)
+    if "imgmask" in sample:
+        text[:sample["imgmask"].shape[1]] = sample["imgmask"][0].to(device)
     return torch.cat([text, torch.ones(H * W // 4, dtype=torch.bool, device=device)]).unsqueeze(0)
 
 
@@ -499,13 +501,25 @@ def run_preview(model, scheduler, sample, neg, size, step):
         with torch.no_grad():
             g = torch.Generator(device="cuda").manual_seed(actual_seed)
             latents = denoise(model, scheduler, sample, H, W, g, neg)
+            # Los pesos del Turbo LoRA en la GPU ya no hacen falta: se liberan antes del VAE.
+            for h in hooks:
+                h.remove()
+            hooks = []
 
             vae = VaeHolder.get().to("cuda")
             lat = unpack_latents(latents, H, W).to(vae.dtype).unsqueeze(2)
             mean = torch.tensor(vae.config.latents_mean, device="cuda", dtype=lat.dtype).view(1, -1, 1, 1, 1)
             std  = torch.tensor(vae.config.latents_std,  device="cuda", dtype=lat.dtype).view(1, -1, 1, 1, 1)
             # El VAE devuelve RGBA; en las previews solo interesa el color.
-            img = vae.decode(lat * std + mean, return_dict=False)[0][:, :3, 0]
+            try:
+                img = vae.decode(lat * std + mean, return_dict=False)[0][:, :3, 0]
+            except torch.OutOfMemoryError:
+                # Con 8 GB y el entrenamiento cargado (768² o más) no cabe entera: por mosaicos usa ~1 GB
+                # en vez de ~4.4 GB, a cambio de alguna marca leve en las uniones. Sigue así el resto del run.
+                print("  ↳ Low VRAM: tiled VAE decode for previews / Poca VRAM: decodificación por mosaicos en las previews")
+                torch.cuda.empty_cache()
+                vae.enable_tiling()
+                img = vae.decode(lat * std + mean, return_dict=False)[0][:, :3, 0]
             img = ((img.float() / 2 + 0.5).clamp(0, 1)[0].cpu().permute(1, 2, 0).numpy() * 255).astype("uint8")
             vae.to("cpu")
 
@@ -763,9 +777,6 @@ def train_qwen_image21():
         buckets[tuple(cache_data[nombre]["lat"].shape[2:])].append(nombre)
 
     edit_mode = any("ctrl" in v for v in cache_data.values())
-    if edit_mode and BATCH_SIZE > 1:
-        # Cada par tiene su propia estructura de secuencia (dónde van los huecos del antes).
-        print(f"\n[!] Edit dataset: batch {BATCH_SIZE} -> 1 (use Grad Accum) / Dataset de edición: batch {BATCH_SIZE} -> 1 (usa Grad Accum)")
 
     if os.path.exists(f"{CACHE_DIR}/_custom_embed.pt"):
         cache_data["_custom"] = load_sample("_custom")
@@ -815,7 +826,7 @@ def train_qwen_image21():
             t0 = time.time()
 
             size = random.choice(list(buckets))
-            names = [random.choice(buckets[size]) for _ in range(1 if edit_mode else BATCH_SIZE)]
+            names = [random.choice(buckets[size]) for _ in range(BATCH_SIZE)]
             latents = torch.cat([cache_data[n]["lat"] for n in names]).to("cuda", non_blocking=True)
             embeds, masks = collate_text([cache_data[n]["emb"] for n in names], [cache_data[n]["msk"] for n in names])
             embeds = embeds.to("cuda", non_blocking=True)
@@ -832,9 +843,13 @@ def train_qwen_image21():
             noisy = ((1 - t_exp) * latent_packed + t_exp * noise).to(torch.bfloat16)
             target = noise - latent_packed
 
-            # En edición el antes va delante, limpio; con batch > 1 (solo texto a imagen) el texto
-            # rellenado comparte la misma estructura en todas las muestras.
-            hidden, shapes, img_mask = model_inputs({**cache_data[names[0]], "emb": embeds}, noisy, H, W, "cuda")
+            # En edición el antes de cada muestra va delante, limpio. El modelo usa una sola fila de
+            # img_mask para todo el batch: vale porque la imagen va antes de la instrucción, así que en
+            # un mismo bucket las ranuras del antes caen en las mismas posiciones en todos los pares.
+            batch = {**cache_data[names[0]], "emb": embeds}
+            if edit_mode:
+                batch["ctrl"] = torch.cat([cache_data[n]["ctrl"] for n in names])
+            hidden, shapes, img_mask = model_inputs(batch, noisy, H, W, "cuda")
             pred = model(
                 hidden_states=hidden,
                 encoder_hidden_states=embeds,
