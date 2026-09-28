@@ -1,10 +1,5 @@
 
-# 🚧 WIP — AcademiaSD Qwen-Image 2.1 LoRAlab
-
-> [!WARNING]
-> **Work in progress / En desarrollo.** Training works and has been tested, but the project is still changing and some features have not been verified yet. Every feature below is marked **✅ Verified** or **⚠️ Not verified**.
->
-> **El entrenamiento funciona y está probado, pero el proyecto sigue cambiando y hay funciones sin verificar.** Cada función de abajo está marcada como **✅ Verificado** o **⚠️ Sin verificar**.
+# AcademiaSD Qwen-Image 2.1 LoRAlab
 
 ![AcademiaSD_LoRAlab-Qwen_Image21](assets/portada.jpg)
 
@@ -13,7 +8,6 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Status-WIP-orange.svg" alt="Status">
   <img src="https://img.shields.io/badge/Python-3.13-blue.svg" alt="Python Version">
   <img src="https://img.shields.io/badge/PyTorch-2.14%20cu130-orange.svg" alt="PyTorch">
   <img src="https://img.shields.io/badge/CUDA-NVIDIA-green.svg" alt="CUDA">
@@ -30,7 +24,7 @@ All measurements below were taken on an **RTX 5080 (16 GB)**.
 | Feature | Status |
 | :--- | :--- |
 | Character / object / style LoRAs (image + caption) | ✅ Verified — 512×512, rank 8/alpha 8, LR 4e-4, 500 steps: good likeness, no overfitting, clothes and backgrounds change freely. ~9 min 20 s (~1 s/step) |
-| LoRA Type selector in Pre-Cache: **Normal** (image + caption) or **Edit** (`name_before` / `name_after` pairs + instruction) | ⚠️ Not verified in a full run |
+| LoRA Type selector in Pre-Cache: **Normal** (image + caption) or **Edit** (`name_before` / `name_after` pairs + instruction) | ✅ Verified |
 | Edit LoRAs (`name_before` / `name_after` pairs + instruction) | ✅ Verified — 30 pairs, 512×512, 300 steps, ~9 min (1.7 s/step): the style is learned and applied to an image outside the dataset |
 | 768×768 / 1024×1024 training | ✅ Verified — 768²: 2.2 s/step, ~8.4 GB VRAM · 1024²: ~4.3 s/step, ~7.6–8.4 GB VRAM |
 | NF4 transformer (7B) | ✅ Verified — loads in ~2 s, 3.9 GB VRAM, cosine 0.998–0.9996 vs BF16 |
@@ -41,7 +35,7 @@ All measurements below were taken on an **RTX 5080 (16 GB)**.
 | Live preview **seed** | ✅ Verified |
 | Live **custom preview prompt** and edit preview image (encoded on CPU while training, on GPU otherwise; buttons are locked until it finishes) | ✅ Verified |
 | 8 GB GPUs | ✅ Verified — 512² and 768² (at 768² previews switch to a tiled VAE decode) |
-| Batch size > 1 in edit LoRAs | ⚠️ Not verified in a full run (inputs checked on CPU) |
+| Batch size > 1 in edit LoRAs | ✅ Verified |
 
 ### Previews
 | Feature | Status |
@@ -60,7 +54,7 @@ All measurements below were taken on an **RTX 5080 (16 GB)**.
 ### Dataset tools
 | Feature | Status |
 | :--- | :--- |
-| Auto-captioner with Qwen3-VL-8B (the model's own text encoder, NF4, no extra download): **Normal** and **Edit** modes | ✅ Verified from script (~11 s/image, ~3 s/pair, ~6 GB VRAM) · ⚠️ UI button not verified |
+| Auto-captioner with Qwen3-VL-8B (the model's own text encoder, NF4): **Normal** and **Edit** modes | ✅ Verified — ~11 s/image, ~3 s/pair, ~6 GB VRAM |
 | Dataset Manager: search, grid sizes, resizable grid, per-image delete, common text (append / replace / remove), clear captions | ✅ Verified |
 | Delete Pre-Cache / Delete Training buttons | ✅ Verified (server) |
 | `.parquet` extractor (edit pairs or single images, balanced, filtered by tags and colorfulness) | ✅ Verified |
@@ -77,8 +71,8 @@ All measurements below were taken on an **RTX 5080 (16 GB)**.
 | :--- | :--- |
 | `Install_LoRAlab-Qwen_Image21.bat` (Python 3.13 venv, PyTorch cu130, diffusers from GitHub) | ✅ Verified |
 | `Run_LoRAlab-Qwen_Image21.bat` | ✅ Verified |
-| Automatic model download from Hugging Face | ⚠️ Not verified (repository not published yet) |
-| `Update_LoRAlab-Qwen_Image21.bat` | ⚠️ Not verified (needs the public repository) |
+| Automatic model download from Hugging Face | ✅ Verified |
+| `Update_LoRAlab-Qwen_Image21.bat` | ✅ Verified |
 
 ---
 
